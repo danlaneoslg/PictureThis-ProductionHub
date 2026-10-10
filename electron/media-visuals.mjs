@@ -13,18 +13,24 @@ export function waveformPeaks(pcm, count = 160) {
   }
   return peaks;
 }
-function run(exe, args, limit = 65536, onChunk) {
+function run(exe, args, limit = 65536, onChunk, signal) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error('Media visualization cancelled.')); return; }
     const child = spawn(exe, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let size = 0, error = '', failure; const chunks = [];
+    const abort = () => { failure = new Error('Media visualization cancelled.'); child.kill(); };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
     const timer = setTimeout(() => { failure = new Error('Media visualization timed out.'); child.kill(); }, 120000);
     child.stdout.on('data', chunk => { size += chunk.length; if (size > limit) { failure = new Error('Media visualization exceeded output limit.'); child.kill(); } else if (onChunk) onChunk(chunk); else chunks.push(chunk); });
     child.stderr.on('data', chunk => { error = (error + chunk.toString()).slice(-8192); });
-    child.on('error', err => { clearTimeout(timer); reject(err); });
-    child.on('close', code => { clearTimeout(timer); if (failure) reject(failure); else if (code !== 0) reject(new Error(`Media visualization failed: ${error || code}`)); else resolve(Buffer.concat(chunks)); });
+    child.on('error', err => { cleanup(); reject(failure || err); });
+    child.on('close', code => { cleanup(); if (failure) reject(failure); else if (code !== 0) reject(new Error(`Media visualization failed: ${error || code}`)); else resolve(Buffer.concat(chunks)); });
   });
 }
 export async function generateMediaVisuals(media, options) {
+  if (options.signal?.aborted) throw new Error('Media visualization cancelled.');
   if (!Number.isFinite(media.duration) || media.duration <= 0 || media.duration > 21600) throw new Error('Visual timeline supports videos up to six hours.');
   const identity = JSON.stringify([path.resolve(options.cacheDir), media.path, media.duration, media.audio, options.ffmpeg]);
   if (activeJobs.has(identity)) return activeJobs.get(identity);
@@ -32,34 +38,39 @@ export async function generateMediaVisuals(media, options) {
   activeJobs.set(identity, job);
   try { return await job; } finally { if (activeJobs.get(identity) === job) activeJobs.delete(identity); }
 }
-async function generate(media, { ffmpeg, cacheDir }) {
+async function generate(media, { ffmpeg, cacheDir, signal }) {
   if (!Number.isFinite(media.duration) || media.duration <= 0 || media.duration > 21600) throw new Error('Visual timeline supports videos up to six hours.');
   const stat = await fs.stat(media.path);
   const key = crypto.createHash('sha256').update(JSON.stringify(['visuals-v2', path.resolve(media.path), stat.size, stat.mtimeMs, media.duration, media.audio])).digest('hex');
   const dir = path.resolve(cacheDir, key), manifest = path.join(dir, 'manifest.json');
   const thumbnails = Array.from({ length: 6 }, (_, i) => path.join(dir, `thumb-${i}.jpg`));
   try {
+    if (signal?.aborted) throw new Error('Media visualization cancelled.');
     const cached = JSON.parse(await fs.readFile(manifest, 'utf8'));
-    if (cached.thumbnails?.length === 6 && Array.isArray(cached.waveform) && (cached.waveform.length === 0 || cached.waveform.length === 160) && cached.waveform.every(value => Number.isFinite(value) && value >= 0 && value <= 1)) { await Promise.all(thumbnails.map(async file => { if (!(await fs.stat(file)).size) throw new Error("Empty thumbnail cache."); })); return { thumbnails, waveform: cached.waveform }; }
+    if (cached.thumbnails?.length === 6 && Array.isArray(cached.waveform) && (cached.waveform.length === 0 || cached.waveform.length === 160) && cached.waveform.every(value => Number.isFinite(value) && value >= 0 && value <= 1)) { await Promise.all(thumbnails.map(async file => { if (!(await fs.stat(file)).size) throw new Error("Empty thumbnail cache."); })); if (signal?.aborted) throw new Error('Media visualization cancelled.'); return { thumbnails, waveform: cached.waveform }; }
   } catch { /* Regenerate incomplete caches. */ }
+  if (signal?.aborted) throw new Error('Media visualization cancelled.');
   await fs.mkdir(dir, { recursive: true });
   const attempt = crypto.randomUUID(), temporary = [];
   try {
     for (let i = 0; i < 6; i++) {
       const temp = path.join(dir, `${attempt}-${i}.jpg`); temporary.push(temp);
-      await run(ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-ss', String(media.duration * (i + 0.5) / 6), '-i', media.path, '-frames:v', '1', '-vf', 'scale=160:-2', temp]);
+      await run(ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-ss', String(media.duration * (i + 0.5) / 6), '-i', media.path, '-frames:v', '1', '-vf', 'scale=160:-2', temp], 65536, undefined, signal);
       await fs.access(temp); await fs.rename(temp, thumbnails[i]);
     }
     const waveform = Array(160).fill(0); let sampleIndex = 0, carry = Buffer.alloc(0);
     const consume = chunk => { const pcm = Buffer.concat([carry, chunk]); const length = pcm.length - pcm.length % 2; for (let i = 0; i < length; i += 2) { const bin = Math.min(159, Math.floor(sampleIndex++ * 160 / (media.duration * 8000))); waveform[bin] = Math.max(waveform[bin], Math.abs(pcm.readInt16LE(i)) / 32768); } carry = pcm.subarray(length); };
-    if (media.audio !== false) await run(ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-i', media.path, '-t', String(media.duration), '-map', '0:a:0?', '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', 'pipe:1'], Math.ceil(media.duration * 16000) + 65536, consume).catch(err => {
+    if (media.audio !== false) await run(ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-i', media.path, '-t', String(media.duration), '-map', '0:a:0?', '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', 'pipe:1'], Math.ceil(media.duration * 16000) + 65536, consume, signal).catch(err => {
       if (/does not contain any stream|matches no streams/i.test(err.message)) return Buffer.alloc(0);
       throw err;
     });
     if (!sampleIndex) waveform.length = 0;
+    if (signal?.aborted) throw new Error('Media visualization cancelled.');
     const pending = path.join(dir, `${attempt}.json`); temporary.push(pending);
     await fs.writeFile(pending, JSON.stringify({ thumbnails, waveform })); await fs.rename(pending, manifest);
     return { thumbnails, waveform };
   } finally { await Promise.all(temporary.map(file => fs.rm(file, { force: true }).catch(() => {}))); }
 }
+
+
 

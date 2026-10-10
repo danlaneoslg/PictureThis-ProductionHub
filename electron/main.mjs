@@ -10,6 +10,7 @@ import { startMediaJob } from './media-job.mjs';
 import { validateExportTarget } from './export-target.mjs';
 import { parseHighlights } from './ai-response.mjs';
 import { clipFilters } from './effects.mjs';
+import { correctTranscript } from './transcript-edit.mjs';
 import { generateMediaVisuals } from './media-visuals.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const diagnosticRoot = path.join(here,'../data/logs');
@@ -29,7 +30,7 @@ process.on('unhandledRejection',startupFailure);
 app.disableHardwareAcceleration();
 logStartup(`Starting Electron ${process.versions.electron}; software rendering enabled`);
 protocol.registerSchemesAsPrivileged([{ scheme: 'hub-media', privileges: { standard:true, secure:true, corsEnabled:true, stream: true, supportFetchAPI: true } }]);
-let win, root, project, busy = false, child;
+let win, root, project, busy = false, child, visualController;
 const previewFiles=new Map();
 const previewSmoke=process.argv.includes('--preview-smoke');
 const recordingSmoke = process.argv.includes('--recording-smoke');
@@ -154,7 +155,7 @@ async function transcribe(mediaId) {
   project.suggestions = candidates(project.transcript); await save();
 }
 async function paidAnalysis(key) {
-  const text = JSON.stringify(project.transcript); const estimate = quote(text,config);
+  const text = JSON.stringify(project.transcript.map(({originalText,...segment})=>segment)); const estimate = quote(text,config);
   if (estimate.key !== key) throw new Error('Estimate changed. Preview the cost again.');
   if (project.cache[key]) { project.suggestions = project.cache[key]; await save(); return; }
   const previous=project.ledger.find(row=>row.key===key&&row.response);
@@ -197,7 +198,7 @@ app.whenReady().then(async () => {
     logStartup('No active project yet; opened unsaved workspace');
   }
   // Recover a matching truncated response once, without another API request.
-  const transcriptText=JSON.stringify(project.transcript);
+  const transcriptText=JSON.stringify(project.transcript.map(({originalText,...segment})=>segment));
   const legacyKey=crypto.createHash('sha256').update(JSON.stringify([transcriptText,config,'highlights-v1'])).digest('hex');
   const recoverable=project.ledger.findLast(row=>row.key===legacyKey&&row.status==='completed'&&row.response?.stop_reason==='max_tokens'&&!row.recovered);
   if(recoverable){
@@ -218,7 +219,7 @@ app.whenReady().then(async () => {
   win.webContents.on('will-navigate',(event) => event.preventDefault());
   ipcMain.handle('hub',async (event,action,payload) => {
     if (event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) throw new Error('Unauthorized frame.');
-    if (action === 'cancel') { child?.cancel(); return; }
+    if (action === 'cancel') { visualController?.abort();child?.cancel(); return; }
     if (busy) throw new Error('Wait for the current operation.');
     busy = true;
     try {
@@ -229,7 +230,7 @@ app.whenReady().then(async () => {
         const media=project.media.find(item=>item.id===payload);
         if(!media)throw new Error('Select an existing source.');
         progress('Preparing source thumbnails and waveform…');
-        const visuals=await generateMediaVisuals(media,{ffmpeg:config.ffmpeg,cacheDir:path.join(root,'visuals')});
+        visualController=new AbortController();let visuals;try{visuals=await generateMediaVisuals(media,{ffmpeg:config.ffmpeg,cacheDir:path.join(root,'visuals'),signal:visualController.signal});}finally{visualController=undefined;}
         const thumbnails=visuals.thumbnails.map(file=>{const id=crypto.createHash('sha256').update(file).digest('hex');previewFiles.set(id,file);return `hub-media://${id}`;});
         return {thumbnails,waveform:visuals.waveform};
       }
@@ -237,9 +238,14 @@ app.whenReady().then(async () => {
       else if (action === 'relink') await relinkSource(payload);
       else if (action === 'edit' || action === 'save') await saveEdit(payload);
       else if (action === 'transcribe') await transcribe(payload);
+      else if (action === 'transcript-edit') {
+        if(payload?.projectId!==project.id || !Number.isInteger(payload.index) || typeof payload.text!=='string' || !payload.text.trim() || payload.text.length>10000 || !project.transcript[payload.index])throw new Error('Invalid transcript correction.');
+        project.transcript=correctTranscript(project.transcript,payload.index,payload.text);
+        await save();
+      }
       else if (action === 'local') { project.suggestions=candidates(project.transcript); await save(); }
       else if (action === 'review') { const suggestion=project.suggestions[payload.index]; if (!suggestion || !['accept','reject'].includes(payload.decision)) throw new Error('Invalid review.'); if (payload.decision==='accept') { validateClip(suggestion,project.media.find(m=>m.id===suggestion.mediaId)); project.clips.push({id:crypto.randomUUID(),mediaId:suggestion.mediaId,start:suggestion.start,end:suggestion.end}); } project.feedback ??= []; project.feedback.push({suggestion,decision:payload.decision,date:new Date().toISOString()}); project.suggestions.splice(payload.index,1); await save(); }
-      else if (action === 'quote') { if (!project.transcript.length) throw new Error('Transcribe a video first.'); const q=quote(JSON.stringify(project.transcript),config); return {...q,cached:!!project.cache[q.key],spent:project.ledger.reduce((s,r)=>s+r.cost,0)}; }
+      else if (action === 'quote') { if (!project.transcript.length) throw new Error('Transcribe a video first.'); const q=quote(JSON.stringify(project.transcript.map(({originalText,...segment})=>segment)),config); return {...q,cached:!!project.cache[q.key],spent:project.ledger.reduce((s,r)=>s+r.cost,0)}; }
       else if (action === 'analyze') await paidAnalysis(payload);
       else if (action === 'export') { const format=typeof payload==='string'?payload:payload.format;if(typeof payload==='object')await saveEdit(payload.edit);const result=await exportVideo(format,payload?.clipId);return {project,config,cap:CAP,...result}; }
       else if (action === 'preview') { await saveEdit(payload.edit);const result=await exportVideo(payload.format,undefined,true);return {project,config,cap:CAP,...result}; }
@@ -320,6 +326,6 @@ app.whenReady().then(async () => {
     } catch(error) { console.error(error); app.exit(1); }
   }
 }).catch(startupFailure);
-app.on('window-all-closed',() => { child?.cancel(); app.quit(); });
+app.on('window-all-closed',() => { visualController?.abort();child?.cancel(); app.quit(); });
 
 
