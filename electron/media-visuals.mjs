@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+const activeJobs = new Map();
 export function waveformPeaks(pcm, count = 160) {
   const samples = Math.floor(pcm.length / 2);
   if (!samples) return [];
@@ -23,15 +24,23 @@ function run(exe, args, limit = 65536, onChunk) {
     child.on('close', code => { clearTimeout(timer); if (failure) reject(failure); else if (code !== 0) reject(new Error(`Media visualization failed: ${error || code}`)); else resolve(Buffer.concat(chunks)); });
   });
 }
-export async function generateMediaVisuals(media, { ffmpeg, cacheDir }) {
+export async function generateMediaVisuals(media, options) {
+  if (!Number.isFinite(media.duration) || media.duration <= 0 || media.duration > 21600) throw new Error('Visual timeline supports videos up to six hours.');
+  const identity = JSON.stringify([path.resolve(options.cacheDir), media.path, media.duration, media.audio, options.ffmpeg]);
+  if (activeJobs.has(identity)) return activeJobs.get(identity);
+  const job = generate(media, options);
+  activeJobs.set(identity, job);
+  try { return await job; } finally { if (activeJobs.get(identity) === job) activeJobs.delete(identity); }
+}
+async function generate(media, { ffmpeg, cacheDir }) {
   if (!Number.isFinite(media.duration) || media.duration <= 0 || media.duration > 21600) throw new Error('Visual timeline supports videos up to six hours.');
   const stat = await fs.stat(media.path);
-  const key = crypto.createHash('sha256').update(JSON.stringify(['visuals-v1', path.resolve(media.path), stat.size, stat.mtimeMs, media.duration, media.audio])).digest('hex');
+  const key = crypto.createHash('sha256').update(JSON.stringify(['visuals-v2', path.resolve(media.path), stat.size, stat.mtimeMs, media.duration, media.audio])).digest('hex');
   const dir = path.resolve(cacheDir, key), manifest = path.join(dir, 'manifest.json');
   const thumbnails = Array.from({ length: 6 }, (_, i) => path.join(dir, `thumb-${i}.jpg`));
   try {
     const cached = JSON.parse(await fs.readFile(manifest, 'utf8'));
-    if (cached.thumbnails?.length === 6 && Array.isArray(cached.waveform)) { await Promise.all(thumbnails.map(file => fs.access(file))); return { thumbnails, waveform: cached.waveform }; }
+    if (cached.thumbnails?.length === 6 && Array.isArray(cached.waveform) && (cached.waveform.length === 0 || cached.waveform.length === 160) && cached.waveform.every(value => Number.isFinite(value) && value >= 0 && value <= 1)) { await Promise.all(thumbnails.map(async file => { if (!(await fs.stat(file)).size) throw new Error("Empty thumbnail cache."); })); return { thumbnails, waveform: cached.waveform }; }
   } catch { /* Regenerate incomplete caches. */ }
   await fs.mkdir(dir, { recursive: true });
   const attempt = crypto.randomUUID(), temporary = [];
