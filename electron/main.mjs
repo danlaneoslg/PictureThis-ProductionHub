@@ -10,6 +10,7 @@ import { startMediaJob } from './media-job.mjs';
 import { validateExportTarget } from './export-target.mjs';
 import { parseHighlights } from './ai-response.mjs';
 import { clipFilters } from './effects.mjs';
+import { generateMediaVisuals } from './media-visuals.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const diagnosticRoot = path.join(here,'../data/logs');
 mkdirSync(diagnosticRoot,{recursive:true});
@@ -224,6 +225,14 @@ app.whenReady().then(async () => {
       if (action === 'state') return { project,config,cap:CAP };
       else if (action === 'new') { project = newProject(); await save(); }
       else if (action === 'open') { const selection = await dialog.showOpenDialog(win,{ defaultPath:root,properties:['openFile'],filters:[{name:'Hub project',extensions:['json']}] }); if (!selection.canceled) { const file = path.resolve(selection.filePaths[0]); if (path.dirname(file) !== root || ['active.json','settings.json'].includes(path.basename(file))) throw new Error('Select a saved Hub project.'); const loaded = JSON.parse(await fs.readFile(file,'utf8')); if (!loaded.id || !Array.isArray(loaded.media) || !Array.isArray(loaded.ledger)) throw new Error('Invalid project.'); project = loaded; await save(); } }
+      else if (action === 'visuals') {
+        const media=project.media.find(item=>item.id===payload);
+        if(!media)throw new Error('Select an existing source.');
+        progress('Preparing source thumbnails and waveform…');
+        const visuals=await generateMediaVisuals(media,{ffmpeg:config.ffmpeg,cacheDir:path.join(root,'visuals')});
+        const thumbnails=visuals.thumbnails.map(file=>{const id=crypto.createHash('sha256').update(file).digest('hex');previewFiles.set(id,file);return `hub-media://${id}`;});
+        return {thumbnails,waveform:visuals.waveform};
+      }
       else if (action === 'import') await mediaImport();
       else if (action === 'relink') await relinkSource(payload);
       else if (action === 'edit' || action === 'save') await saveEdit(payload);
@@ -262,7 +271,7 @@ app.whenReady().then(async () => {
         project.media=[{id:mediaId,name:'Edit test',path:path.join(here,'../data/testsource/sample.mp4'),duration:9}];
         project.clips=[{id:crypto.randomUUID(),mediaId,start:1,end:3},{id:crypto.randomUUID(),mediaId,start:5,end:7}];
         await save();await win.reload();
-        await win.webContents.executeJavaScript("new Promise((resolve,reject)=>{let attempts=0;const check=()=>{if(document.querySelectorAll('.clip').length===2){document.querySelector('[aria-label=\"Remove clip\"]').click();setTimeout(()=>document.querySelectorAll('.clip').length===1?resolve(true):reject(new Error('Removed clip stayed visible')),0);}else if(++attempts>100)reject(new Error('Edit fixture did not load'));else setTimeout(check,50);};check();})");
+        await win.webContents.executeJavaScript("new Promise((resolve,reject)=>{let attempts=0;const check=()=>{if(document.querySelectorAll('.hub-timeline-clip').length===2){document.querySelector('.hub-timeline-clip').click();setTimeout(()=>{Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Ripple delete').click();setTimeout(()=>document.querySelectorAll('.hub-timeline-clip').length===1?resolve(true):reject(new Error('Removed clip stayed visible')),0);},0);}else if(++attempts>100)reject(new Error('Edit fixture did not load'));else setTimeout(check,50);};check();})");
         await win.webContents.executeJavaScript("new Promise((resolve,reject)=>{let attempts=0;const check=async()=>{const state=await window.hub.call('state').catch(()=>null);if(state?.project.clips.length===1)resolve(true);else if(++attempts>100)reject(new Error('Removal did not persist'));else setTimeout(check,50);};check();})");
         const persisted=JSON.parse(await fs.readFile(path.join(root,project.id+'.json'),'utf8'));
         if(persisted.clips.length!==1||persisted.media.length!==1)throw new Error('Removal altered source or failed to save');

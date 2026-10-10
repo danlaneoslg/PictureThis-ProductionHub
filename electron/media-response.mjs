@@ -13,7 +13,7 @@ export async function mediaResponse(file, request) {
     else { start=Number(match[1]); if(match[2])end=Math.min(end,Number(match[2])); }
     if (!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||start>=size||end<start) return new Response(null,{status:416,headers:{'Content-Range':`bytes */${size}`}});
   }
-  const mime={'.mp4':'video/mp4','.mov':'video/quicktime','.webm':'video/webm','.mkv':'video/x-matroska','.avi':'video/x-msvideo'}[path.extname(file).toLowerCase()]||'application/octet-stream';
+  const mime={'.jpg':'image/jpeg','.png':'image/png','.mp4':'video/mp4','.mov':'video/quicktime','.webm':'video/webm','.mkv':'video/x-matroska','.avi':'video/x-msvideo'}[path.extname(file).toLowerCase()]||'application/octet-stream';
   const headers={'Content-Type':mime,'Content-Length':String(end-start+1),'Accept-Ranges':'bytes'};
   if(range)headers['Content-Range']=`bytes ${start}-${end}/${size}`;
   return new Response(request.method==='HEAD'?null:Readable.toWeb(createReadStream(file,{start,end})),{status:range?206:200,headers});
