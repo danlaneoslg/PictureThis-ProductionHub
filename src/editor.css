@@ -3,3 +3,5 @@
 .save-notice{color:#d9b675;font-size:13px;margin:8px 0 12px;min-height:18px}
 
 .source-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px;border:1px solid #4a4030;border-radius:8px;margin-top:12px}.source-tools strong{width:100%;font-size:12px;color:#d9b675}.source-tools button,.source-tools span{font-size:12px}
+
+.visual-status{color:#d9b675;font-size:12px;margin:8px 0}.trim-mode{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0;font-size:12px}.trim-mode strong{color:#d9b675}

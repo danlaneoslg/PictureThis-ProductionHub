@@ -16,3 +16,13 @@ test('media streaming supports seeking, suffix ranges and invalid ranges without
   assert.equal(await fs.readFile(file,'utf8'),'0123456789');
  }finally{await fs.unlink(file);await fs.rmdir(folder);}
 });
+
+test('thumbnail response advertises JPEG and supports HEAD without reading body', async () => {
+ const folder=await fs.mkdtemp(path.join(os.tmpdir(),'hub-image-'));
+ const file=path.join(folder,'thumb.jpg');await fs.writeFile(file,Buffer.from([255,216,255,217]));
+ try {
+  const response=await mediaResponse(file,new Request('https://local/image',{method:'HEAD'}));
+  assert.equal(response.status,200);assert.equal(response.headers.get('content-type'),'image/jpeg');
+  assert.equal(response.headers.get('content-length'),'4');assert.equal(await response.text(),'');
+ } finally {await fs.unlink(file);await fs.rmdir(folder);}
+});
