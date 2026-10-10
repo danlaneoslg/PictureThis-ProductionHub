@@ -8,3 +8,8 @@ test('waveform bins preserve normalized peaks', () => {
 test('invalid durations are rejected before spawning', async()=>{
  for(const duration of [0,NaN,21601]) await assert.rejects(generateMediaVisuals({duration},{}),/six hours/);
 });
+
+test('pre-aborted visualization rejects before accessing files or spawning', async () => {
+ const controller = new AbortController(); controller.abort();
+ await assert.rejects(generateMediaVisuals({duration: 1}, {signal: controller.signal}), /cancelled/);
+});
