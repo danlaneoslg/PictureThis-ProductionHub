@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { validateEffects } from './effects.mjs';
 export const CAP = 1_000_000; // integer millionths of a dollar
 export function quote(text, config) {
   if (!text.trim()) throw new Error('Add a transcript first.');
@@ -18,7 +19,9 @@ export function reserve(project, estimate) {
 }
 export function validateClip(clip, media) {
   if (!media || !Number.isFinite(clip.start) || !Number.isFinite(clip.end) || clip.start < 0 || clip.end > media.duration || clip.end <= clip.start) throw new Error('Invalid clip boundaries.');
+  validateEffects(clip);
 }
 export function candidates(segments) {
   return segments.filter(s => s.text.trim()).map(s => ({ ...s, score: Math.min(99, 45 + (/[?!]/.test(s.text) ? 20 : 0) + (/best|why|secret|surpris|learn|mistake/i.test(s.text) ? 20 : 0)), reason: 'Local transcript heuristic — review before adding.' })).sort((a,b) => b.score-a.score).slice(0,12);
 }
+

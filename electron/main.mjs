@@ -9,6 +9,7 @@ import { mediaResponse } from './media-response.mjs';
 import { startMediaJob } from './media-job.mjs';
 import { validateExportTarget } from './export-target.mjs';
 import { parseHighlights } from './ai-response.mjs';
+import { clipFilters } from './effects.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const diagnosticRoot = path.join(here,'../data/logs');
 mkdirSync(diagnosticRoot,{recursive:true});
@@ -45,7 +46,20 @@ app.on('second-instance',()=>{ if(win) { if(win.isMinimized())win.restore();win.
 let config = { ffmpeg: 'ffmpeg', ffprobe: 'ffprobe', whisper: 'whisper', model: '', inputRate: 0, outputRate: 0 };
 const newProject = () => ({ id: crypto.randomUUID(), name: 'Untitled video', media: [], clips: [], transcript: [], suggestions: [], ledger: [], cache: {} });
 async function atomic(file, value) { await fs.writeFile(file + '.tmp', JSON.stringify(value, null, 2)); await fs.rename(file + '.tmp', file); }
-async function save() { if (!/^[0-9a-f-]{36}$/.test(project.id)) throw new Error('Invalid project ID.'); await atomic(path.join(root, project.id + '.json'), project); await atomic(path.join(root, 'active.json'), { id: project.id }); }
+async function save() {
+  if (!/^[0-9a-f-]{36}$/.test(project.id)) throw new Error('Invalid project ID.');
+  const file=path.join(root,project.id+'.json');
+  // Retain the previous complete project, including its spending ledger.
+  try {
+    const previous=await fs.readFile(file);
+    const recovery=path.join(root,'recovery',project.id);
+    await fs.mkdir(recovery,{recursive:true});
+    await fs.writeFile(path.join(recovery,Date.now()+'-'+crypto.randomUUID()+'.json'),previous);
+    const snapshots=(await fs.readdir(recovery)).filter(name=>/^\d+-[0-9a-f-]+\.json$/.test(name)).sort();
+    for(const name of snapshots.slice(0,Math.max(0,snapshots.length-10)))await fs.unlink(path.join(recovery,name));
+  } catch(error) { if(error.code!=='ENOENT')throw error; }
+  await atomic(file,project);await atomic(path.join(root,'active.json'),{id:project.id});
+}
 async function saveEdit(payload) {
   if (!payload || typeof payload.name!=='string' || payload.name.length>120 || !Array.isArray(payload.clips) || payload.clips.length>500) throw new Error('Invalid edit.');
   payload.clips.forEach(clip=>validateClip(clip,project.media.find(media=>media.id===clip.mediaId)));
@@ -93,8 +107,8 @@ async function exportVideo(format,clipId,preview=false) {
   await fs.mkdir(exportFolder,{recursive:true});
   let previewKey;
   if(preview){
-    const sources=await Promise.all(clips.map(async clip=>{const media=project.media.find(item=>item.id===clip.mediaId);const info=await fs.stat(media.path);return [media.path,info.size,info.mtimeMs,clip.start,clip.end];}));
-    previewKey=crypto.createHash('sha256').update(JSON.stringify(['joined-preview-v1',format,sources])).digest('hex');
+    const sources=await Promise.all(clips.map(async clip=>{const media=project.media.find(item=>item.id===clip.mediaId);const info=await fs.stat(media.path);return [media.path,info.size,info.mtimeMs,clip.start,clip.end,clip.effects,clip.transition];}));
+    previewKey=crypto.createHash('sha256').update(JSON.stringify(['joined-preview-v2',format,sources])).digest('hex');
     const cached=path.join(exportFolder,previewKey+'.mp4');
     try{await fs.access(cached);previewFiles.set(previewKey,cached);return {previewUrl:`hub-media://${previewKey}`};}catch(error){if(error.code!=='ENOENT')throw error;}
   }
@@ -109,9 +123,10 @@ async function exportVideo(format,clipId,preview=false) {
     for (let i=0; i<clips.length; i++) {
       progress(`Exporting clip ${i+1} of ${clips.length}. The finished video joins clips in this order.`);
       const clip = clips[i], media = project.media.find(m => m.id === clip.mediaId); validateClip(clip,media);
+      const filters=clipFilters(clip,width,height,i>0?clips[i-1].transition:undefined);
       const args = ['-nostdin','-n','-ss',String(clip.start),'-i',media.path];
       if (!media.audio) args.push('-f','lavfi','-i','anullsrc=r=48000:cl=stereo');
-      args.push('-t',String(clip.end-clip.start),'-map','0:v:0','-map',media.audio ? '0:a:0' : '1:a:0','-vf',`scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30`,'-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-c:a','aac','-ar','48000','-ac','2',path.join(scratch,`${i}.mp4`));
+      args.push('-t',String(clip.end-clip.start),'-map','0:v:0','-map',media.audio ? '0:a:0' : '1:a:0','-vf',filters.video,'-af',filters.audio,'-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-c:a','aac','-ar','48000','-ac','2',path.join(scratch,`${i}.mp4`));
       await run(config.ffmpeg,args);
     }
     progress('Joining clips into the finished video…');
@@ -297,3 +312,5 @@ app.whenReady().then(async () => {
   }
 }).catch(startupFailure);
 app.on('window-all-closed',() => { child?.cancel(); app.quit(); });
+
+
